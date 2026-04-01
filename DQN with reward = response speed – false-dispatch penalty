@@ -1,0 +1,95 @@
+
+
+import numpy as np
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# --------------------------
+# 1. Custom Environment
+# --------------------------
+class DispatchEnv:
+    def _init_(self):
+        self.reset()
+    def reset(self):
+        self.urgency = np.random.randint(1, 10)   # urgency level
+        self.time_left = 10
+        return np.array([self.urgency, self.time_left], dtype=np.float32)
+    def step(self, action):
+        self.time_left -= 1
+        # Reward = response speed - false dispatch penalty
+        if action == 1:  # Dispatch
+            reward = (10 - self.time_left) - (0 if self.urgency > 5 else 5)
+        else:  # Ignore
+            reward = 0 if self.urgency <= 5 else -5
+        done = self.time_left <= 0
+        return np.array([self.urgency, self.time_left], dtype=np.float32), reward, done
+
+# --------------------------
+# 2. DQN Model
+# --------------------------
+class DQN(nn.Module):
+    def _init_(self):
+        super()._init_()
+        self.fc = nn.Sequential(
+            nn.Linear(2, 32), nn.ReLU(),
+            nn.Linear(32, 32), nn.ReLU(),
+            nn.Linear(32, 2)  # 2 actions: ignore or dispatch
+        )
+    def forward(self, x):
+        return self.fc(x)
+
+# --------------------------
+# 3. Training Loop
+# --------------------------
+env = DispatchEnv()
+net = DQN()
+opt = optim.Adam(net.parameters(), lr=0.01)
+loss_fn = nn.MSELoss()
+memory = []
+eps = 0.3   # exploration rate
+
+for ep in range(30):  # train for 30 episodes
+    s = env.reset()
+    total_reward = 0
+    for t in range(10):  # each episode max 10 steps
+        # Epsilon-greedy action
+        if random.random() < eps:
+            a = random.randint(0, 1)
+        else:
+            with torch.no_grad():
+                a = torch.argmax(net(torch.tensor(s))).item()
+        ns, r, done = env.step(a)
+        memory.append((s, a, r, ns, done))
+        if len(memory) > 1000: memory.pop(0)
+
+        # Sample random batch from memory
+        batch = random.sample(memory, min(32, len(memory)))
+        s_b, a_b, r_b, ns_b, d_b = zip(*batch)
+
+        s_b = torch.tensor(s_b, dtype=torch.float32)
+        ns_b = torch.tensor(ns_b, dtype=torch.float32)
+        a_b = torch.tensor(a_b)
+        r_b = torch.tensor(r_b, dtype=torch.float32)
+        d_b = torch.tensor(d_b, dtype=torch.float32)
+
+        # Current Q-values
+        q = net(s_b).gather(1, a_b.unsqueeze(1)).squeeze()
+
+        # Target Q-values
+        with torch.no_grad():
+            qn = net(ns_b).max(1)[0]
+            target = r_b + 0.9 * qn * (1 - d_b)
+
+        # Train
+        loss = loss_fn(q, target)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        s = ns
+        total_reward += r
+        if done:
+            break
+    print(f"Episode {ep+1}: Total Reward = {total_reward:.2f}")
